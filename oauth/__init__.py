@@ -16,148 +16,6 @@ class _BaseOauthDeviceCode:
         return self._type
 
 
-class OauthDeviceCode_Google(_BaseOauthDeviceCode):
-    # https://console.developers.google.com/apis/dashboard
-    def __init__(self, jsonPath, initAccessToken=None, initRefreshToken=None,
-                 initAccessTokenExpiresAt=None):
-        with open(jsonPath, mode='rt') as file:
-            self._creds = json.loads(file.read())
-
-        self._session = requests.session()
-
-        self._type = 'Google'
-
-        # will be filled in later
-        self._accessToken = initAccessToken
-        self._refreshToken = initRefreshToken
-        self._accessTokenExpiresAt = initAccessTokenExpiresAt or time.time()  # time.time
-        self._verificationURI = None
-        self._userCode = None
-        self._deviceCode = None
-        self._deviceCodeExpiresAt = time.time()
-        self._interval = 5
-        self._lastRequest = time.time() - self._interval
-
-    def _InitVerificationURI(self):
-        authURL = '{}?{}'.format(
-            self._creds['installed']['auth_uri'],
-            urlencode({
-                'client_id': self._creds['installed']['client_id'],
-                'redirect_uri': self._creds['installed']['redirect_uris'][-1],
-                'scope': ' '.join([
-                    'https://www.googleapis.com/auth/calendar',
-                    'https://www.googleapis.com/auth/admin.directory.user',
-                    'https://www.googleapis.com/auth/admin.directory.resource.calendar'
-                    # to read the resource "capacity"
-                ]),
-                'access_type': 'offline',
-                'response_type': 'code',
-            })
-        )
-        self._verificationURI = authURL
-        return authURL
-
-    def _DoRequest(self, method, url, data=None, params=None):
-        resp = self._session.request(method=method, url=url, data=data, params=params)
-        return resp
-
-    def GetUserCode(self):
-        data = {
-            'client_id': self._creds['installed']['client_id'],
-            'scope': ' '.join([
-                'https://www.googleapis.com/auth/calendar',
-                # 'https://www.googleapis.com/auth/admin.directory.resource.calendar.readonly', # to read directory, but giving an "invalid_scope" error so idk
-                # 'https://www.googleapis.com/auth/admin.directory.resource.calendar',  # to read the resource "capacity"
-
-            ]),
-        }
-        url = 'https://accounts.google.com/o/oauth2/device/code'
-        resp = requests.post(url, data=data)
-
-        if not resp.ok:
-            return
-
-        self._verificationURI = resp.json().get('verification_url')
-        self._userCode = resp.json().get('user_code')
-        self._deviceCode = resp.json().get('device_code')
-        self._interval = resp.json().get('interval', self._interval)
-        self._deviceCodeExpiresAt = time.time() + resp.json().get('expires_in')
-        self._lastRequest = time.time()
-        return self._userCode
-
-    @property
-    def VerificationURI(self):
-        return self._verificationURI
-
-    @property
-    def Interval(self):
-        return self._interval
-
-    def DeviceCodeExpired(self):
-        return time.time() > self._deviceCodeExpiresAt
-
-    def GetRefreshToken(self):
-        return self._refreshToken
-
-    def GetAccessTokenExpriesAt(self):
-        return self._accessTokenExpiresAt
-
-    def GetAccessToken(self):
-        """
-        Tries to get an access token.
-        Call this before every HTTP request that needs oauth,
-            because the token may have expired.
-        This method will refresh the token if needed and return the new token.
-        Might return None if the user has not authenticated yet
-        :return: str or None
-        """
-        if time.time() - self._lastRequest < self._interval:
-            # only make request once per "interval"
-            return self._accessToken
-
-        if self._accessToken:
-            # we already received an access token previously
-            if time.time() > self._accessTokenExpiresAt:
-                url = 'https://oauth2.googleapis.com/token'
-                data = {
-                    'client_id': self._creds['installed']['client_id'],
-                    'client_secret': self._creds['installed']['client_secret'],
-                    'refresh_token': self._refreshToken,
-                    'grant_type': 'refresh_token',
-                }
-                try:
-                    resp = requests.post(url, data)
-                    self._lastRequest = time.time()
-                    self._accessToken = resp.json().get('access_token')
-                    self._refreshToken = resp.json().get('refresh_token',
-                                                         self._refreshToken)  # google uses the same refresh token?
-                    self._accessTokenExpiresAt = time.time() + resp.json().get('expires_in')
-                except Exception as e:
-                    print(e)
-                return self._accessToken
-            else:
-                delta = int(self._accessTokenExpiresAt - time.time())
-                return self._accessToken
-        else:
-            # This is the first time we are retrieving an access token
-            url = 'https://oauth2.googleapis.com/token'
-            resp = requests.post(
-                url,
-                data={
-                    'grant_type': 'http://oauth.net/grant_type/device/1.0',
-                    'client_id': self._creds['installed']['client_id'],
-                    'client_secret': self._creds['installed']['client_secret'],
-                    'code': self._deviceCode
-                }
-            )
-            self._lastRequest = time.time()
-            self._accessToken = resp.json().get('access_token', None)
-            self._refreshToken = resp.json().get('refresh_token', None)
-            if self._accessToken:
-                self._accessTokenExpiresAt = time.time() + resp.json().get('expires_in', None)
-            return self._accessToken
-
-
 class OauthDeviceCode_Microsoft(_BaseOauthDeviceCode):
     def __init__(self, **k):
         self.clientID = k.get('clientID')
@@ -415,7 +273,7 @@ class AuthManager:
                  microsoftClientID=None,
                  microsoftTenantID=None,
                  googleJSONpath=None,
-                 debug=True,
+                 debug=False,
                  ):
         self._microsoftClientID = microsoftClientID
         self._microsoftTenantID = microsoftTenantID
@@ -503,7 +361,8 @@ class AuthManager:
             return self.SaveIncompleteOACallback(ID, oa.dict())
         else:
             raise RuntimeError(
-                'You must first assign a callback to AuthManager.SaveIncompleteOACallback. It must accept two params, ID(str), data(dict)')
+                'You must first assign a callback to AuthManager.SaveIncompleteOACallback. '
+                'It must accept two params, ID(str), data(dict)')
 
     def GetOA(self, ID):
         if self.GetIncompleteOACallback:
@@ -518,7 +377,11 @@ class AuthManager:
                     return OauthDeviceCode_Google(**d)
         else:
             raise RuntimeError(
-                'You must first assign a callback to AuthManager.GetIncompleteOACallback. It must accept one param ID(str) and return a dict that was previously saved using AuthManager.SaveIncompleteOACallback, or return None if not found.')
+                'You must first assign a callback to AuthManager.GetIncompleteOACallback. '
+                'It must accept one param ID(str) '
+                'and return a dict that was previously saved using '
+                'AuthManager.SaveIncompleteOACallback, '
+                'or return None if not found.')
 
     def CreateNewUser(self, ID, authType='Microsoft'):
         assert isinstance(ID, str), '"ID" must be a string not {}'.format(type(ID))
@@ -548,74 +411,3 @@ class AuthManager:
     def print(self, *a, **k):
         if self._debug:
             print(*a, **k)
-
-
-if __name__ == '__main__':
-    def TestMicrosoft():
-        try:
-            import creds
-        except:
-            class Dummy:
-                pass
-
-            creds = Dummy()
-            creds.clientID = '459ac21c-adde-45a5-abf3-85d757ba2fdf'
-            creds.tenantID = '30f18c78-f7ab-4851-9759-88950e65dc4b'
-
-        import webbrowser
-
-        MY_ID = '3888'
-        TYPE = 'Microsoft'
-
-        authManager = AuthManager(
-            microsoftClientID=creds.clientID,
-            microsoftTenantID=creds.tenantID,
-        )
-
-        user = authManager.GetUserByID(MY_ID)
-        if user is None:
-            d = authManager.CreateNewUser(
-                MY_ID,
-                authType=TYPE
-            )
-            webbrowser.open(d.get('verification_uri'))
-
-        while True:
-            user = authManager.GetUserByID(MY_ID)
-            if user is None:
-                time.sleep(1)
-            else:
-                break
-
-
-    def TestGoogle():
-        import creds
-        import webbrowser
-        MY_ID = '3888'
-        JSON_PATH = 'client_secret_673364926560-srmglql2fn27lfk6rea3oear6itdlojn.apps.googleusercontent.com.json'
-        TYPE = 'Google'
-
-        authManager = AuthManager(
-            googleJSONpath=JSON_PATH,
-        )
-
-        user = authManager.GetUserByID(MY_ID)
-
-        if user is None:
-            print('No user exists for ID="{}"'.format(MY_ID))
-
-            d = authManager.CreateNewUser(MY_ID, authType=TYPE)
-            webbrowser.open(d.get('verification_uri'))
-            print('User Code=', d.get('user_code'))
-
-        while True:
-            user = authManager.GetUserByID(MY_ID)
-            if user is None:
-                time.sleep(1)
-            else:
-                break
-        print('user=', user)
-
-
-    TestMicrosoft()
-    # TestGoogle()
