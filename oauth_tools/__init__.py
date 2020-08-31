@@ -107,7 +107,7 @@ class OauthDeviceCode_Microsoft(_BaseOauthDeviceCode):
     def GetAccessToken(self, forceRefresh=False):
         """
         Tries to get an access token.
-        Call this before every HTTP request that needs oauth,
+        Call this before every HTTP request that needs oauth_tools,
             because the token may have expired.
         This method will refresh the token if needed and return the new token.
         Might return None if the user has not authenticated yet
@@ -281,7 +281,7 @@ class AuthManager:
         self._debug = debug
 
         self.SaveToDBCallback = None
-        # will be called when the system needs to save oauth creds to the database,
+        # will be called when the system needs to save oauth_tools creds to the database,
         # should accept a single parameter User() object, you prob want to save user.Data as json
 
         self.GetFromDBCallback = None  # called when data needs to be retrieved from the database. accepts one parameter,
