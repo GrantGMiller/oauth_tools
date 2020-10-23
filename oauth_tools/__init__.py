@@ -176,6 +176,8 @@ class OauthDeviceCode_Microsoft(_BaseOauthDeviceCode):
                     'device_code': self._deviceCode
                 }
             )
+            if not resp.ok:
+                self.print('resp.text=', resp.text)
             self._lastRequest = time.time()
             self._accessToken = resp.json().get('access_token', None)
 
@@ -213,7 +215,7 @@ class User:
         return '<User: ID={}, EmailAddress={}, AccessToken={}>'.format(
             self.ID,
             self.EmailAddress,
-            self.GetAccessToken()[:10]
+            self.GetAccessToken()[:10] if self.GetAccessToken() else 'None'
         )
 
     @property
