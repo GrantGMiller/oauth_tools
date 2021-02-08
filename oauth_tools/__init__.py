@@ -2,12 +2,22 @@ import datetime
 import json
 import time
 import requests
-from urllib.parse import urlencode
-import threading
 
 # based on the steps here:https://developers.google.com/identity/protocols/OAuth2ForDevices
 
 USE_COMMON_TENANT = False  # per microsoft: Usage of the /common endpoint is not supported for such applications created after '10/15/2018'
+DEFAULT_SCOPE_LIST = [
+    'openid',
+    'offline_access',
+    'https://outlook.office.com/Calendars.ReadWrite',
+    'email',
+    'User.Read'
+]
+DEFAULT_GCC_SCOPE_LIST = [
+    'https://graph.microsoft.com/Calendars.ReadWrite',
+    # 'https://outlook.office.com/Calendars.ReadWrite',
+    'User.Read',
+]
 
 
 class _BaseOauthDeviceCode:
@@ -22,6 +32,9 @@ class OauthDeviceCode_Microsoft(_BaseOauthDeviceCode):
         self.tenantID = k.get('tenantID')
 
         self._type = 'Microsoft'
+        self.GCC = k.get('GCC', False)
+        self.SCOPE_LIST = DEFAULT_GCC_SCOPE_LIST if self.GCC else DEFAULT_SCOPE_LIST
+        print('OauthDeviceCode_Microsoft.SCOPE_LIST=', self.SCOPE_LIST)
 
         # will be filled in later
         self._accessToken = k.get('accessToken', None)
@@ -65,17 +78,15 @@ class OauthDeviceCode_Microsoft(_BaseOauthDeviceCode):
 
         data = {
             'client_id': self.clientID,
-            'scope': ' '.join([
-                'openid',
-                'offline_access',
-                'https://outlook.office.com/Calendars.ReadWrite',
-                'https://outlook.office.com/EWS.AccessAsUser.All',
-                'email',
-                'User.Read'
-            ]),
+            'scope': ' '.join(self.SCOPE_LIST),
         }
-        url = 'https://login.microsoftonline.com/{}/oauth2/v2.0/devicecode'.format(self.tenantID)
+        if self.GCC:
+            url = 'https://login.microsoftonline.us/{}/oauth2/v2.0/devicecode'.format(self.tenantID)
+        else:
+            url = 'https://login.microsoftonline.com/{}/oauth2/v2.0/devicecode'.format(self.tenantID)
+        print('url=', url)
         resp = requests.post(url, data=data)
+        print('resp=', resp.text)
         if not 200 <= resp.status_code < 300:
             return
 
@@ -129,20 +140,19 @@ class OauthDeviceCode_Microsoft(_BaseOauthDeviceCode):
                     forceRefresh:
                 self.print('282 Access token is expired. Get a new one. Force Refresh=', forceRefresh)
                 if USE_COMMON_TENANT:
-                    url = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
+                    if self.GCC:
+                        url = 'https://login.microsoftonline.us/common/oauth2/v2.0/token'
+                    else:
+                        url = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
                 else:
-                    url = 'https://login.microsoftonline.com/{}/oauth2/v2.0/token'.format(self.tenantID)
+                    if self.GCC:
+                        url = 'https://login.microsoftonline.us/{}/oauth2/v2.0/token'.format(self.tenantID)
+                    else:
+                        url = 'https://login.microsoftonline.com/{}/oauth2/v2.0/token'.format(self.tenantID)
 
                 data = {
                     'client_id': self.clientID,
-                    'scope': ' '.join([
-                        'openid',
-                        'offline_access',
-                        'https://outlook.office.com/Calendars.ReadWrite',
-                        'https://outlook.office.com/EWS.AccessAsUser.All',
-                        'email',
-                        'User.Read'
-                    ]),
+                    'scope': ' '.join(self.SCOPE_LIST),
                     'refresh_token': self._refreshToken,
                     'grant_type': 'refresh_token',
                 }
@@ -164,9 +174,16 @@ class OauthDeviceCode_Microsoft(_BaseOauthDeviceCode):
             # This is the first time we are retrieving an access token
 
             if USE_COMMON_TENANT:
-                url = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
+                if self.GCC:
+                    url = 'https://login.microsoftonline.us/common/oauth2/v2.0/token'
+                else:
+                    url = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
+
             else:
-                url = 'https://login.microsoftonline.com/{}/oauth2/v2.0/token'.format(self.tenantID)
+                if self.GCC:
+                    url = 'https://login.microsoftonline.us/{}/oauth2/v2.0/token'.format(self.tenantID)
+                else:
+                    url = 'https://login.microsoftonline.com/{}/oauth2/v2.0/token'.format(self.tenantID)
 
             resp = requests.post(
                 url,
@@ -188,9 +205,10 @@ class OauthDeviceCode_Microsoft(_BaseOauthDeviceCode):
 
 
 class User:
-    def __init__(self, ID, authManagerParent, authType):
+    def __init__(self, ID, authManagerParent, authType, GCC=False):
         self._ID = ID
-
+        self.GCC = GCC
+        self.SCOPE_LIST = DEFAULT_GCC_SCOPE_LIST if self.GCC else DEFAULT_SCOPE_LIST
         data = authManagerParent.Get(ID)
         if authType == 'Google':
             self._oa = OauthDeviceCode_Google(
@@ -207,6 +225,8 @@ class User:
                 refreshToken=data.get('refreshToken', None),
                 accessTokenExpiresAt=data.get('accessTokenExpiresAt', None),
                 debug=authManagerParent._debug,
+                GCC=self.GCC,
+                SCOPE_LIST=DEFAULT_GCC_SCOPE_LIST if self.GCC else DEFAULT_GCC_SCOPE_LIST,
             )
         self._emailAddress = data.get('emailAddress', None)
         self._authManagerParent = authManagerParent
@@ -215,7 +235,7 @@ class User:
         return '<User: ID={}, EmailAddress={}, AccessToken={}>'.format(
             self.ID,
             self.EmailAddress,
-            self.GetAccessToken()[:10] if self.GetAccessToken() else 'None'
+            self.GetAccessToken()[:10] + '...' if self.GetAccessToken() else 'None'
         )
 
     @property
@@ -252,6 +272,7 @@ class User:
         if self._emailAddress is None:
             resp = requests.get(
                 # 'https://graph.microsoft.com/v1.0/me',
+                # 'https://outlook.office.us/api/v2.0/me' if self.GCC else 'https://outlook.office.com/api/v2.0/me',
                 'https://outlook.office.com/api/v2.0/me',
                 headers={
                     'Authorization': 'Bearer {}'.format(self._oa.GetAccessToken()),
@@ -276,7 +297,12 @@ class AuthManager:
                  microsoftTenantID=None,
                  googleJSONpath=None,
                  debug=False,
+                 GCC=False
                  ):
+
+        self.SCOPE_LIST = []
+        self.GCC = GCC
+        self.SCOPE_LIST = DEFAULT_GCC_SCOPE_LIST if self.GCC else DEFAULT_SCOPE_LIST
         self._microsoftClientID = microsoftClientID
         self._microsoftTenantID = microsoftTenantID
         self._googleJSONpath = googleJSONpath
@@ -340,6 +366,7 @@ class AuthManager:
                 ID,
                 authManagerParent=self,
                 authType=d['type'],
+                GCC=self.GCC,
             )
         else:
             return None
@@ -374,7 +401,12 @@ class AuthManager:
                 return None
             else:
                 if d['type'] == 'Microsoft':
-                    return OauthDeviceCode_Microsoft(debug=self._debug, **d)
+                    return OauthDeviceCode_Microsoft(
+                        debug=self._debug,
+                        GCC=self.GCC,
+                        SCOPE_LIST=DEFAULT_GCC_SCOPE_LIST if self.GCC else DEFAULT_SCOPE_LIST,
+                        **d
+                    )
                 elif d['type'] == 'Google':
                     return OauthDeviceCode_Google(**d)
         else:
@@ -395,6 +427,8 @@ class AuthManager:
                 clientID=self._microsoftClientID,
                 tenantID=self._microsoftTenantID,
                 debug=self._debug,
+                GCC=self.GCC,
+                SCOPE_LIST=DEFAULT_GCC_SCOPE_LIST if self.GCC else DEFAULT_SCOPE_LIST,
             )
         else:
             raise TypeError('Unrecognized authType "{}"'.format(authType))
@@ -423,6 +457,9 @@ if __name__ == '__main__':
 
     if not os.path.exists('users.json'):
         open('users.json', mode='wt').write(json.dumps({}))
+
+    print('creds.clientID=', creds.clientID)
+    print('creds.tenantID=', creds.tenantID)
 
     authManager = AuthManager(
         microsoftClientID=creds.clientID,
